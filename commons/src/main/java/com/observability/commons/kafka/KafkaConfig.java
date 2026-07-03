@@ -24,6 +24,10 @@ import org.springframework.kafka.support.serializer.ErrorHandlingDeserializer;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * Shared Kafka producer/consumer configuration.
+ * Registers JSON serde, reconnect backoff, and the listener factory with trace propagation.
+ */
 @Configuration
 @EnableKafka
 @Slf4j
@@ -48,6 +52,7 @@ public class KafkaConfig {
         factory.setRecordInterceptor(kafkaRecordInterceptor);
         factory.setConcurrency(1);
         factory.setCommonErrorHandler(new CommonErrorHandler() {
+            /** Records unhandled consumer errors on the active OTel span. */
             @Override
             public void handleOtherException(Exception thrownException, Consumer<?, ?> consumer,
                                              MessageListenerContainer container, boolean batchListener) {
@@ -92,8 +97,6 @@ public class KafkaConfig {
         config.put(ConsumerConfig.RECONNECT_BACKOFF_MS_CONFIG, 5_000);
         config.put(ConsumerConfig.RECONNECT_BACKOFF_MAX_MS_CONFIG, 60_000);
         config.put(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, 5_000);
-        config.put(ProducerConfig.RECONNECT_BACKOFF_MS_CONFIG, 5_000);
-        config.put(ProducerConfig.RECONNECT_BACKOFF_MAX_MS_CONFIG, 60_000);
         config.put(ProducerConfig.RETRIES_CONFIG, 3);
     }
 

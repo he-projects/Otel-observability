@@ -17,6 +17,7 @@ public class FeignWrappedResponseDecoder implements Decoder {
 
     private final ObjectMapper objectMapper;
 
+    /** Stores the Jackson mapper used to unwrap {@code {traceId, data}} Feign responses. */
     public FeignWrappedResponseDecoder(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
     }

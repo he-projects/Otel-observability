@@ -29,6 +29,7 @@ public class KafkaRecordInterceptor implements RecordInterceptor<String, Object>
     private final ThreadLocal<Scope> scopeHolder = new ThreadLocal<>();
 
     private final TextMapGetter<ConsumerRecord<String, Object>> getter = new TextMapGetter<>() {
+        /** Lists Kafka header keys so OTel can extract traceparent. */
         @Override
         public Iterable<String> keys(ConsumerRecord<String, Object> carrier) {
             return StreamSupport.stream(carrier.headers().spliterator(), false)
@@ -36,6 +37,7 @@ public class KafkaRecordInterceptor implements RecordInterceptor<String, Object>
                     .toList();
         }
 
+        /** Reads a single header value (e.g. traceparent) from the Kafka record. */
         @Override
         public String get(ConsumerRecord<String, Object> carrier, String key) {
             Header header = carrier.headers().lastHeader(key);
