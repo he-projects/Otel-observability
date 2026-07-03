@@ -5,8 +5,15 @@ spring:
   application:
     name: order-service
 
-catalog:
-  base-url: http://localhost:8080
+feign:
+  catalog-service-url: http://localhost:8080
+
+kafka:
+  bootstrap-servers: localhost:9094
+
+message-broker:
+  topic:
+    order-created: order.created.topic
 
 management:
   endpoints:
@@ -21,6 +28,7 @@ management:
         enabled: true
         step: 5s
   tracing:
+    enabled: true
     sampling:
       probability: 1.0
 

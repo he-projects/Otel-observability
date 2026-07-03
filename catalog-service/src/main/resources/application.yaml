@@ -5,6 +5,13 @@ spring:
   application:
     name: catalog-service
 
+kafka:
+  bootstrap-servers: localhost:9094
+
+message-broker:
+  topic:
+    order-created: order.created.topic
+
 management:
   endpoints:
     web:
@@ -18,6 +25,7 @@ management:
         enabled: true
         step: 5s
   tracing:
+    enabled: true
     sampling:
       probability: 1.0
 

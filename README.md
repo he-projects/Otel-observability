@@ -1,46 +1,87 @@
 # OpenTelemetry Observability Stack
 
-A multi-service Spring Boot project demonstrating **observability** with OpenTelemetry, Tempo, Loki, Prometheus, and Grafana.
+A multi-service Spring Boot project demonstrating **observability** with OpenTelemetry, Tempo, Loki, Prometheus, Grafana, **OpenFeign**, and **Kafka**.
 
-Two small microservices (`catalog-service` and `order-service`) emit traces, logs, and metrics so you can follow telemetry through the full stack.
+Every HTTP response includes a **traceId** (success and error). Feign propagates W3C trace context across services, and Kafka messages carry `traceparent` so async hops appear in the same distributed trace.
 
 ---
 
 ## What This Project Does
 
-1. **catalog-service** (port 8080) — returns a product catalog.
-2. **order-service** (port 8081) — creates orders and calls catalog-service for product details.
-3. Every HTTP request automatically produces **traces** (spans).
-4. **Logs** are exported to Loki with `trace_id` and `span_id` attached.
-5. **Metrics** are scraped from `/actuator/prometheus` by Prometheus.
-6. **Grafana** visualizes everything and correlates traces with logs.
+| Component | Port | Role |
+|-----------|------|------|
+| **catalog-service** | 8080 | Product catalog + Kafka consumer (inventory reservation) |
+| **order-service** | 8081 | Creates orders via Feign + publishes Kafka events |
+| **Kafka** | 9094 | Async messaging between services |
+| **OTel Collector** | 4318 | Telemetry gateway (OTLP) |
+| **Tempo** | 3200 | Trace storage |
+| **Loki** | 3100 | Log storage |
+| **Prometheus** | 9090 | Metrics storage |
+| **Grafana** | 3000 | Visualization UI |
+
+### Observability signals
+
+| Signal | Backend | How it flows |
+|--------|---------|--------------|
+| Traces | Tempo | OTLP push via OTel Collector |
+| Logs | Loki | OTLP push with `trace_id` / `span_id` |
+| Metrics | Prometheus | Pull scrape from `/actuator/prometheus` |
 
 ---
 
 ## Architecture
 
 ```
-catalog-service ──┐
-                  │  OTLP (HTTP :4318)
-order-service  ───┼──► OTel Collector ──► Tempo (traces)
-                  │         │
-                  │         ├──► Loki (logs)
-                  │         └──► Prometheus (metrics via :8889)
-                  │
-                  └── /actuator/prometheus ◄── Prometheus (scrape)
-                                              │
-                                              ▼
-                                           Grafana
-                                    (Tempo + Loki + Prometheus)
+Client
+  │
+  ▼
+order-service ──Feign (sync)──► catalog-service
+  │                                   ▲
+  │ Kafka (async)                     │ Kafka consumer span
+  └──────── order.created.topic ──────┘
+
+All services ──OTLP :4318──► OTel Collector ──► Tempo / Loki / Prometheus ──► Grafana
 ```
 
-### The Three Observability Signals
+### End-to-end trace for `POST /api/orders`
 
-| Signal | Backend | Model | Purpose |
-|--------|---------|-------|---------|
-| Traces | Tempo | Push (OTLP) | Request path across services |
-| Logs | Loki | Push (OTLP) | Log lines linked by `trace_id` |
-| Metrics | Prometheus | Pull (scrape) | Request counts, latency, JVM stats |
+```
+POST /api/orders                    (order-service — root HTTP span)
+  ├─ GET /api/products/{id}       (catalog-service — Feign child span)
+  ├─ Kafka produce order.created    (producer span)
+  └─ Kafka consume order.created    (catalog-service — CONSUMER span, same traceId)
+
+Response body:
+{
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+  "data": { "orderId": 1001, "product": {...}, "quantity": 2, "total": 99.98 }
+}
+```
+
+### Error response (always includes traceId)
+
+```json
+{
+  "errorCode": 404,
+  "message": "Product not found: 99",
+  "traceId": "4bf92f3577b34da6a3ce929d0e0e4736"
+}
+```
+
+---
+
+## Trace ID in Every Response
+
+Shared module `commons` provides:
+
+| Class | Purpose |
+|-------|---------|
+| `TraceIdResponseAdvice` | Wraps success bodies as `{ traceId, data }` |
+| `GlobalExceptionHandler` | Maps errors to `{ errorCode, message, traceId }` |
+| `FeignWrappedResponseDecoder` | Unwraps `{ traceId, data }` on Feign clients |
+| `FeignOtelInterceptor` | Injects W3C trace context on outbound Feign calls |
+| `KafkaEventProducer` | Adds `traceparent` header on publish |
+| `KafkaRecordInterceptor` | Starts CONSUMER span linked to producer trace |
 
 ---
 
@@ -48,150 +89,261 @@ order-service  ───┼──► OTel Collector ──► Tempo (traces)
 
 - Java 21+
 - Maven 3.9+
-- Docker Desktop (for `host.docker.internal`)
+- Docker Desktop (for Kafka, Tempo, Loki, Prometheus, Grafana)
 
 ---
 
 ## Running the Project
 
-### 1. Start the observability stack
+### 1. Start infrastructure
 
 ```bash
 cd otel-observability
 docker compose up -d
 ```
 
-Wait ~15 seconds for all containers to become healthy.
+Wait ~20 seconds for Kafka and the observability stack to become ready.
 
-### 2. Build and run the services
+### 2. Build
 
-Terminal 1:
+```bash
+mvn clean package
+```
+
+### 3. Run services (two terminals)
 
 ```bash
 mvn -pl catalog-service spring-boot:run
 ```
 
-Terminal 2:
-
 ```bash
 mvn -pl order-service spring-boot:run
 ```
 
-### 3. Generate traffic
+---
+
+## Test Workflow (step by step)
+
+Run these steps in order to verify the full observability flow: HTTP → Feign → Kafka → traceId in responses → Grafana.
+
+### Step 0 — Check services are up
 
 ```bash
-# List products
-curl http://localhost:8080/api/products
-
-# Create an order (order-service → catalog-service)
-curl -X POST http://localhost:8081/api/orders \
-  -H "Content-Type: application/json" \
-  -d '{"productId": 1, "quantity": 2}'
-
-# Cross-service health check
-curl http://localhost:8081/api/orders/health-check
+curl -s http://localhost:8080/actuator/health
+curl -s http://localhost:8081/actuator/health
 ```
 
-### 4. Open Grafana
+Expected: `{"status":"UP"}` for both.
 
-| Tool | URL | Credentials |
-|------|-----|-------------|
-| Grafana | http://localhost:3000 | admin / admin |
-| Prometheus | http://localhost:9090 | — |
-| Tempo API | http://localhost:3200 | — |
+---
 
-**In Grafana:**
+### Step 1 — Browse catalog (HTTP + traceId)
 
-- **Explore → Tempo** — search traces by service name (`order-service` or `catalog-service`)
-- **Explore → Loki** — `{service_name="order-service"}`
-- **Explore → Prometheus** — `http_server_requests_seconds_count`
+```bash
+curl -s http://localhost:8080/api/products
+```
+
+Expected response shape:
+
+```json
+{
+  "traceId": "<32-char-hex>",
+  "data": [
+    { "id": 1, "name": "Keyboard", "price": 49.99 },
+    { "id": 2, "name": "Mouse", "price": 19.99 },
+    { "id": 3, "name": "Monitor", "price": 299.99 }
+  ]
+}
+```
+
+Copy the `traceId` value — you will use it in Grafana (Step 6).
+
+---
+
+### Step 2 — Feign health check (order → catalog)
+
+```bash
+curl -s http://localhost:8081/api/orders/health-check
+```
+
+Expected:
+
+```json
+{
+  "traceId": "<hex>",
+  "data": { "status": "ok", "catalog": "reachable", "transport": "feign" }
+}
+```
+
+In Tempo this trace should show two linked spans: `order-service` and `catalog-service`.
+
+---
+
+### Step 3 — Create an order (Feign + Kafka)
+
+```bash
+curl -s -X POST http://localhost:8081/api/orders \
+  -H "Content-Type: application/json" \
+  -d "{\"productId\": 1, \"quantity\": 2}"
+```
+
+Expected:
+
+```json
+{
+  "traceId": "<hex>",
+  "data": {
+    "orderId": 1001,
+    "product": { "id": 1, "name": "Keyboard", "price": 49.99 },
+    "quantity": 2,
+    "total": 99.98
+  }
+}
+```
+
+**Save this `traceId`** — it is the main trace to inspect in Grafana.
+
+What happened under the hood:
+
+1. `order-service` received `POST /api/orders`
+2. Feign called `GET /api/products/1` on `catalog-service`
+3. `OrderCreatedEvent` was published to `order.created.topic`
+4. `catalog-service` consumed the event and reserved inventory
+
+---
+
+### Step 4 — Verify Kafka side effect (inventory)
+
+Wait 1–2 seconds, then:
+
+```bash
+curl -s http://localhost:8080/api/products/inventory/reserved
+```
+
+Expected (after Step 3):
+
+```json
+{
+  "traceId": "<hex>",
+  "data": { "1": 2 }
+}
+```
+
+Product `1` (Keyboard) now shows `2` reserved units — proof the Kafka consumer ran.
+
+---
+
+### Step 5 — List orders and trigger an error
+
+List orders created in this session:
+
+```bash
+curl -s http://localhost:8081/api/orders
+```
+
+Request a product that does not exist:
+
+```bash
+curl -s http://localhost:8080/api/products/99
+```
+
+Expected error (note `traceId` is still present):
+
+```json
+{
+  "errorCode": 404,
+  "message": "Product not found: 99",
+  "traceId": "<hex>"
+}
+```
+
+Same via order-service (Feign propagates the 404):
+
+```bash
+curl -s -X POST http://localhost:8081/api/orders \
+  -H "Content-Type: application/json" \
+  -d "{\"productId\": 99}"
+```
+
+---
+
+### Step 6 — Verify in Grafana
+
+Open http://localhost:3000 (admin / admin).
+
+| Check | Where | What to look for |
+|-------|-------|------------------|
+| Trace | **Explore → Tempo** | Paste `traceId` from Step 3 |
+| Spans | Tempo trace view | `POST /api/orders` → `GET /api/products/1` → Kafka produce → Kafka consume |
+| Logs | **Explore → Loki** | `{service_name="order-service"}` or filter by `trace_id` |
+| Log correlation | Tempo trace → **Logs** tab | Related log lines in Loki |
+| Metrics | **Explore → Prometheus** | `http_server_requests_seconds_count` |
+
+---
+
+### Step 7 — Optional: second order (different product)
+
+```bash
+curl -s -X POST http://localhost:8081/api/orders \
+  -H "Content-Type: application/json" \
+  -d "{\"productId\": 3, \"quantity\": 1}"
+
+curl -s http://localhost:8080/api/products/inventory/reserved
+```
+
+Expected inventory: `{ "1": 2, "3": 1 }` (cumulative from both orders).
+
+---
+
+### Workflow checklist
+
+| Step | Action | Verifies |
+|------|--------|----------|
+| 0 | Health checks | Services running |
+| 1 | `GET /api/products` | traceId in success response |
+| 2 | `GET /api/orders/health-check` | Feign cross-service call |
+| 3 | `POST /api/orders` | Feign + Kafka + full trace |
+| 4 | `GET /api/products/inventory/reserved` | Kafka consumer |
+| 5 | `GET /api/products/99` | traceId in error response |
+| 6 | Grafana Tempo/Loki | End-to-end observability |
 
 ---
 
 ## Disabling OTel (local dev without Docker)
 
-If the observability stack is not running, add this JVM option:
+If the observability stack is not running:
 
 ```
 -Dotel.sdk.disabled=true
 ```
 
+Kafka still requires the broker (`docker compose up kafka` is enough if you only need messaging).
+
 ---
 
 ## Configuration Reference
 
-### `catalog-service` / `order-service` — `application.yaml`
+### `application.yaml` (both services)
 
 | Setting | Description |
 |---------|-------------|
-| `server.port` | Service port (8080 / 8081) |
-| `catalog.base-url` | (order-service) Base URL for catalog RestTemplate calls |
-| `management.endpoints.web.exposure.include` | Exposed actuator endpoints (health, prometheus) |
-| `management.metrics.export.prometheus.step` | Micrometer aggregation interval (5s) |
-| `management.tracing.sampling.probability` | Trace sampling rate (1.0 = 100% for learning) |
-| `otel.service.name` | Service name attached to all telemetry |
-| `otel.exporter.otlp.endpoint` | OTel Collector address (`http://localhost:4318`) |
-| `otel.exporter.otlp.protocol` | OTLP transport (`http/protobuf`) |
-| `otel.traces.exporter: otlp` | Export traces to the Collector |
-| `otel.logs.exporter: otlp` | Export logs to the Collector |
-| `otel.metrics.exporter: none` | Metrics via HTTP scrape, not OTLP push |
-
-### `config/otel/otel-collector-config.yaml`
-
-| Section | Description |
-|---------|-------------|
-| `receivers.otlp` | Accepts telemetry on ports 4317 (gRPC) and 4318 (HTTP) |
-| `exporters.otlp/tempo` | Forwards traces to Tempo |
-| `exporters.otlphttp/loki` | Forwards logs to Loki |
-| `exporters.prometheus` | Exposes metrics on port 8889 |
-| `processors.transform/logs` | Copies `trace_id`/`span_id` into log attributes for Grafana correlation |
-| `service.pipelines` | Separate pipelines for traces, logs, and metrics |
-
-### `config/tempo/tempo.yaml`
-
-| Setting | Description |
-|---------|-------------|
-| `server.http_listen_port: 3200` | Query API port for Grafana |
-| `distributor.receivers.otlp` | Receives traces from the Collector |
-| `storage.trace.backend: local` | Stores traces on the local filesystem (dev only) |
-| `storage.trace.wal` | Write-ahead log to prevent trace loss on crash |
-
-### `config/loki/loki-config.yaml`
-
-| Setting | Description |
-|---------|-------------|
-| `auth_enabled: false` | No authentication (dev only) |
-| `schema_config` | TSDB store with schema v13 |
-| `limits_config.allow_structured_metadata` | Accepts structured OTLP logs |
-| `limits_config.otlp_config` | Indexes `service.name`, `trace_id`, and `span_id` |
-
-### `config/prometheus/prometheus.yml`
-
-| Job | Description |
-|-----|-------------|
-| `otel-collector` | Scrapes Collector metrics from `:8889` |
-| `catalog-service` | Scrapes `/actuator/prometheus` on host:8080 |
-| `order-service` | Scrapes `/actuator/prometheus` on host:8081 |
-
-`host.docker.internal` points to the host machine because Spring Boot runs outside Docker.
-
-### `config/grafana/provisioning/datasources/datasources.yaml`
-
-| Datasource | Description |
-|------------|-------------|
-| Prometheus | Metrics queries |
-| Loki | Log queries + link to Tempo (`derivedFields`) |
-| Tempo | Trace queries + link to Loki (`tracesToLogsV2`) + Service Map |
+| `kafka.bootstrap-servers` | Kafka broker (`localhost:9094`) |
+| `message-broker.topic.order-created` | Topic for async order events |
+| `feign.catalog-service-url` | (order-service) Base URL for Feign client |
+| `management.tracing.sampling.probability` | `1.0` = 100% sampling for learning |
+| `otel.exporter.otlp.endpoint` | OTel Collector (`http://localhost:4318`) |
+| `otel.metrics.exporter: none` | Metrics via Prometheus scrape, not OTLP push |
 
 ### `docker-compose.yml`
 
 | Service | Port | Role |
 |---------|------|------|
+| kafka | 9094 | Message broker (KRaft, single node) |
 | loki | 3100 | Log storage |
 | tempo | 3200 | Trace storage |
 | otel-collector | 4317, 4318, 8889 | Telemetry gateway |
-| prometheus | 9090 | Metrics storage |
-| grafana | 3000 | Visualization UI |
+| prometheus | 9090 | Metrics |
+| grafana | 3000 | UI |
 
 ---
 
@@ -199,9 +351,11 @@ If the observability stack is not running, add this JVM option:
 
 | Dependency | Role |
 |------------|------|
-| `opentelemetry-spring-boot-starter` | Auto-instrumentation (HTTP, RestTemplate) |
+| `opentelemetry-spring-boot-starter` | Auto-instrumentation (HTTP, Feign, Kafka) |
 | `opentelemetry-exporter-otlp` | Export traces and logs via OTLP |
-| `spring-boot-starter-actuator` | Exposes `/actuator/prometheus` |
+| `spring-cloud-starter-openfeign` | Declarative HTTP clients |
+| `spring-kafka` | Kafka producer/consumer |
+| `spring-boot-starter-actuator` | `/actuator/prometheus` |
 | `micrometer-registry-prometheus` | Prometheus metrics format |
 
 ---
@@ -210,14 +364,19 @@ If the observability stack is not running, add this JVM option:
 
 ```
 otel-observability/
+├── commons/                    # Shared: traceId, Feign, Kafka, exceptions
+│   └── src/main/java/com/observability/commons/
+│       ├── config/TraceIdResponseAdvice.java
+│       ├── exception/GlobalExceptionHandler.java
+│       ├── feign/FeignOtelInterceptor.java
+│       └── kafka/KafkaRecordInterceptor.java
 ├── catalog-service/
+│   ├── consumer/OrderCreatedListener.java
+│   └── services/InventoryService.java
 ├── order-service/
-├── config/
-│   ├── otel/
-│   ├── tempo/
-│   ├── loki/
-│   ├── prometheus/
-│   └── grafana/
+│   ├── feign/ProductClient.java
+│   └── producer/OrderEventProducer.java
+├── config/                     # Tempo, Loki, Prometheus, Grafana, OTel Collector
 ├── docker-compose.yml
 ├── pom.xml
 └── README.md
@@ -225,20 +384,20 @@ otel-observability/
 
 ---
 
-## Example Request Flow
+## API Reference
 
-```
-POST /api/orders  (order-service)
-    │
-    ├─ span: order-service POST /api/orders
-    │
-    └─ GET /api/products/1  (catalog-service)
-           │
-           └─ span: catalog-service GET /api/products/{id}
+### catalog-service (8080)
 
-Each span  → OTel Collector → Tempo
-Each log   → OTel Collector → Loki (with trace_id)
-Each metric → Prometheus scrape → Grafana
-```
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/products` | List all products |
+| GET | `/api/products/{id}` | Get product by id (404 if missing) |
+| GET | `/api/products/inventory/reserved` | Reserved units per product (Kafka demo) |
 
-Open a trace for an order in Grafana — you will see the child span from catalog-service, and clicking **Logs** shows the related log lines in Loki.
+### order-service (8081)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/orders` | Create order (`productId` required, `quantity` optional) |
+| GET | `/api/orders` | List orders from current session |
+| GET | `/api/orders/health-check` | Feign connectivity check to catalog |
