@@ -6,6 +6,31 @@ You will see how a single user request produces traces, logs, and metrics across
 
 ---
 
+## Table of contents
+
+- [Who is this for?](#who-is-this-for)
+- [What happens in this project?](#what-happens-in-this-project-business-flow)
+- [Response format](#response-format-important)
+- [Components](#components)
+- [Prerequisites](#prerequisites)
+- [Quick start](#quick-start-5-minutes)
+- [Running from IntelliJ](#running-from-intellij)
+- [Full test workflow](#full-test-workflow)
+- [API reference](#api-reference)
+- [Demo catalog](#demo-catalog)
+- [Actuator endpoints](#actuator-endpoints)
+- [Project structure](#project-structure)
+- [How traceId propagation works](#how-traceid-propagation-works)
+- [Telemetry pipeline](#telemetry-pipeline)
+- [Configuration](#configuration)
+- [Maven stack](#maven-stack)
+- [Running without full Docker](#running-without-full-docker)
+- [Stop and cleanup](#stop-and-cleanup)
+- [Troubleshooting](#troubleshooting)
+- [Learning path](#learning-path)
+
+---
+
 ## Who is this for?
 
 Anyone learning:
@@ -101,6 +126,8 @@ Copy `traceId` from any curl response and search it in Grafana → Tempo.
 
 ## Quick start (5 minutes)
 
+**Startup order matters:** Docker first → build → **catalog-service** (8080) → **order-service** (8081).
+
 ```bash
 # 1. Clone and enter project
 cd otel-observability
@@ -108,13 +135,13 @@ cd otel-observability
 # 2. Start Docker stack (Kafka + Tempo + Loki + Prometheus + Grafana)
 docker compose up -d
 
-# 3. Wait ~20 seconds, then verify Kafka is up
-docker ps --filter name=kafka
+# 3. Wait ~20 seconds, then verify containers are up
+docker compose ps
 
 # 4. Build all modules (commons + services)
 mvn clean package
 
-# 5. Run services (two terminals)
+# 5. Run services (two terminals — catalog first)
 mvn -pl catalog-service spring-boot:run
 mvn -pl order-service spring-boot:run
 
@@ -125,7 +152,25 @@ curl -s -X POST http://localhost:8081/api/orders \
   -d "{\"productId\": 1, \"quantity\": 2}"
 ```
 
+**PowerShell (Windows):**
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/products
+Invoke-RestMethod -Method POST -Uri http://localhost:8081/api/orders `
+  -ContentType "application/json" `
+  -Body '{"productId": 1, "quantity": 2}'
+```
+
+**Run packaged JARs instead of Maven:**
+
+```bash
+java -jar catalog-service/target/catalog-service-1.0.0.jar
+java -jar order-service/target/order-service-1.0.0.jar
+```
+
 Open Grafana: http://localhost:3000 (admin / admin) → Explore → Tempo → paste `traceId` from the order response.
+
+Grafana datasources (Prometheus, Loki, Tempo) are **pre-provisioned** — no manual setup required. Tempo is the default datasource with traces-to-logs linked to Loki.
 
 ---
 
@@ -163,6 +208,19 @@ Expected: `{"status":"UP"}`
 curl -s http://localhost:8080/api/products
 ```
 
+Example response:
+
+```json
+{
+  "traceId": "abc123...",
+  "data": [
+    { "id": 1, "name": "Keyboard", "price": 49.99 },
+    { "id": 2, "name": "Mouse", "price": 19.99 },
+    { "id": 3, "name": "Monitor", "price": 299.99 }
+  ]
+}
+```
+
 ### Step 2 — Feign health check
 
 ```bash
@@ -177,6 +235,20 @@ Expected `data`: `{ "status": "ok", "catalog": "reachable", "transport": "feign"
 curl -s -X POST http://localhost:8081/api/orders \
   -H "Content-Type: application/json" \
   -d "{\"productId\": 1, \"quantity\": 2}"
+```
+
+Example response:
+
+```json
+{
+  "traceId": "abc123...",
+  "data": {
+    "orderId": 1001,
+    "product": { "id": 1, "name": "Keyboard", "price": 49.99 },
+    "quantity": 2,
+    "total": 99.98
+  }
+}
 ```
 
 Save the `traceId` — use it in Grafana Tempo.
@@ -208,12 +280,21 @@ Expected: `errorCode: 404` and a `traceId`.
 
 ### Step 6 — Grafana
 
+1. Open http://localhost:3000 → login `admin` / `admin`
+2. **Explore** (compass icon) → datasource **Tempo** (default)
+3. Query type **Search** → paste the `traceId` from Step 3 → **Run query**
+4. Open the trace — you should see spans for:
+   - `POST /api/orders` (order-service)
+   - `GET /api/products/{id}` (Feign child span)
+   - `order.created.topic` (Kafka producer + consumer spans)
+5. Click the **Logs** tab on the trace to jump to correlated Loki logs
+
 | What | Where |
 |------|-------|
-| Trace by ID | Explore → Tempo → paste traceId |
+| Trace by ID | Explore → Tempo → Search → paste traceId |
 | Logs | Explore → Loki → `{service_name="order-service"}` |
 | Metrics | Explore → Prometheus → `http_server_requests_seconds_count` |
-| Trace → Logs | Open a trace → **Logs** tab |
+| Trace → Logs | Open a trace → **Logs** tab (pre-linked via provisioning) |
 
 ### Step 7 — Second order (optional)
 
@@ -261,6 +342,46 @@ Expected `data`: `{ "1": 2, "3": 1 }`
 
 ---
 
+## Demo catalog
+
+In-memory products used by all API examples:
+
+| id | name | price |
+|----|------|-------|
+| 1 | Keyboard | 49.99 |
+| 2 | Mouse | 19.99 |
+| 3 | Monitor | 299.99 |
+
+Use `productId: 99` to trigger a 404 error (Step 5).
+
+### Kafka event (`OrderCreatedEvent`)
+
+Published to `order.created.topic` after each successful order:
+
+| Field | Type | Example |
+|-------|------|---------|
+| `orderId` | long | 1001 |
+| `productId` | int | 1 |
+| `productName` | string | Keyboard |
+| `quantity` | int | 2 |
+| `total` | double | 99.98 |
+
+---
+
+## Actuator endpoints
+
+Both services expose:
+
+| Endpoint | URL (catalog) | URL (order) |
+|----------|---------------|-------------|
+| Health | http://localhost:8080/actuator/health | http://localhost:8081/actuator/health |
+| Prometheus metrics | http://localhost:8080/actuator/prometheus | http://localhost:8081/actuator/prometheus |
+| All metrics | http://localhost:8080/actuator/metrics | http://localhost:8081/actuator/metrics |
+
+Prometheus scrapes these endpoints via `host.docker.internal` (see `config/prometheus/prometheus.yml`).
+
+---
+
 ## Project structure
 
 ```
@@ -298,6 +419,29 @@ otel-observability/
 | Feign inbound | `FeignWrappedResponseDecoder` | Unwraps peer `{traceId, data}` responses |
 | Kafka produce | `KafkaEventProducer` | Adds `traceparent` header |
 | Kafka consume | `KafkaRecordInterceptor` | Starts CONSUMER span linked to producer trace |
+
+---
+
+## Telemetry pipeline
+
+```
+Spring Boot apps (8080, 8081)
+  │  OTLP HTTP :4318  (traces + logs)
+  ▼
+OTel Collector
+  ├─ traces  → Tempo :3200
+  ├─ logs    → Loki  :3100  (trace_id / span_id attached)
+  └─ metrics → :8889       (collector self-metrics)
+
+Spring Boot apps
+  │  /actuator/prometheus
+  ▼
+Prometheus :9090  (scrapes apps + collector)
+
+Grafana :3000  (pre-provisioned: Tempo + Loki + Prometheus)
+```
+
+On **Linux**, if Prometheus cannot reach the apps, add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `prometheus` service in `docker-compose.yml`.
 
 ---
 
@@ -358,6 +502,20 @@ mvn clean package
 
 ---
 
+## Stop and cleanup
+
+```bash
+# Stop Spring Boot services: Ctrl+C in each terminal
+
+# Stop Docker stack (keeps volumes)
+docker compose down
+
+# Stop Docker and remove volumes (fresh start)
+docker compose down -v
+```
+
+---
+
 ## Troubleshooting
 
 ### Kafka: `KAFKA_ZOOKEEPER_CONNECT is required`
@@ -397,6 +555,29 @@ Kafka client reconnect logs are suppressed via `logging.level.org.apache.kafka.*
 1. Is Docker stack running? `docker compose ps`
 2. Are services started **after** Docker?
 3. Is OTLP disabled? Remove `-Dotel.sdk.disabled=true` if set.
+4. Wait 10–15 seconds after the first request — traces need time to export.
+
+### Prometheus shows no app metrics (Linux)
+
+Prometheus uses `host.docker.internal` to scrape apps on the host. On Linux this hostname may not exist by default. Add to the `prometheus` service in `docker-compose.yml`:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+Then run `docker compose up -d prometheus`.
+
+### Port already in use
+
+| Port | Owner |
+|------|-------|
+| 8080 | catalog-service |
+| 8081 | order-service |
+| 3000 | Grafana |
+| 9094 | Kafka |
+
+Stop the conflicting process or change `server.port` in the service's `application.yaml`.
 
 ---
 
