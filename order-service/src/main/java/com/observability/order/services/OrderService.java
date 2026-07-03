@@ -5,6 +5,7 @@ import com.observability.order.feign.ProductClient;
 import com.observability.order.producer.OrderEventProducer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -24,7 +25,7 @@ public class OrderService {
 
     private final AtomicLong orderSequence = new AtomicLong(1000);
     private final ProductClient productClient;
-    private final OrderEventProducer orderEventProducer;
+    private final ObjectProvider<OrderEventProducer> orderEventProducer;
 
     private final List<Map<String, Object>> recentOrders = Collections.synchronizedList(new ArrayList<>());
 
@@ -73,7 +74,10 @@ public class OrderService {
                 .quantity(quantity)
                 .total(total)
                 .build();
-        orderEventProducer.publishOrderCreated(event);
+        orderEventProducer.ifAvailable(producer -> producer.publishOrderCreated(event));
+        if (orderEventProducer.getIfAvailable() == null) {
+            log.info("Kafka disabled — order event not published for orderId={}", orderId);
+        }
 
         Map<String, Object> order = Map.of(
                 "orderId", orderId,

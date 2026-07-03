@@ -4,6 +4,7 @@ import com.observability.commons.kafka.event.OrderCreatedEvent;
 import com.observability.commons.kafka.producer.KafkaEventProducer;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 /**
@@ -11,6 +12,7 @@ import org.springframework.stereotype.Service;
  */
 @Service
 @RequiredArgsConstructor
+@ConditionalOnProperty(name = "kafka.enabled", havingValue = "true", matchIfMissing = true)
 public class OrderEventProducer {
 
     private final KafkaEventProducer kafkaEventProducer;

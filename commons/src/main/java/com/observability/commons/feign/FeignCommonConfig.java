@@ -12,7 +12,7 @@ public class FeignCommonConfig {
 
     /** Creates a decoder that strips the {@code traceId} wrapper from peer service responses. */
     @Bean
-    public Decoder feignDecoder(ObjectMapper objectMapper) {
-        return new FeignWrappedResponseDecoder(objectMapper);
+    public Decoder feignDecoder() {
+        return new FeignWrappedResponseDecoder(new ObjectMapper());
     }
 }

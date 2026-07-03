@@ -46,3 +46,7 @@ otel:
 logging:
   level:
     com.observability: INFO
+    org.apache.kafka: WARN
+    org.apache.kafka.clients.NetworkClient: ERROR
+    org.apache.kafka.clients.Metadata: WARN
+    org.springframework.kafka: WARN

@@ -10,6 +10,7 @@ import io.opentelemetry.context.propagation.TextMapGetter;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.header.Header;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.kafka.listener.RecordInterceptor;
 import org.springframework.stereotype.Component;
 
@@ -21,6 +22,7 @@ import java.util.stream.StreamSupport;
  * via W3C trace context extracted from message headers.
  */
 @Component
+@ConditionalOnProperty(name = "kafka.enabled", havingValue = "true", matchIfMissing = true)
 public class KafkaRecordInterceptor implements RecordInterceptor<String, Object> {
 
     private final ThreadLocal<Span> spanHolder = new ThreadLocal<>();

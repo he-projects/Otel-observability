@@ -11,6 +11,7 @@ import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.kafka.annotation.EnableKafka;
@@ -26,6 +27,7 @@ import java.util.Map;
 @Configuration
 @EnableKafka
 @Slf4j
+@ConditionalOnProperty(name = "kafka.enabled", havingValue = "true", matchIfMissing = true)
 public class KafkaConfig {
 
     @Value("${kafka.bootstrap-servers}")
@@ -67,6 +69,7 @@ public class KafkaConfig {
         config.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, KafkaJsonDeserializer.class);
         config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        applyReconnectBackoff(config);
         return new DefaultKafkaConsumerFactory<>(config);
     }
 
@@ -77,7 +80,21 @@ public class KafkaConfig {
         config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
         config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, KafkaJsonSerializer.class);
         config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        applyReconnectBackoff(config);
         return new DefaultKafkaProducerFactory<>(config);
+    }
+
+    /**
+     * Slower reconnect/backoff so a down broker does not flood the console.
+     * When Kafka is healthy, these settings have no visible effect.
+     */
+    private void applyReconnectBackoff(Map<String, Object> config) {
+        config.put(ConsumerConfig.RECONNECT_BACKOFF_MS_CONFIG, 5_000);
+        config.put(ConsumerConfig.RECONNECT_BACKOFF_MAX_MS_CONFIG, 60_000);
+        config.put(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, 5_000);
+        config.put(ProducerConfig.RECONNECT_BACKOFF_MS_CONFIG, 5_000);
+        config.put(ProducerConfig.RECONNECT_BACKOFF_MAX_MS_CONFIG, 60_000);
+        config.put(ProducerConfig.RETRIES_CONFIG, 3);
     }
 
     /** Spring Kafka template used by {@link com.observability.commons.kafka.producer.KafkaEventProducer}. */

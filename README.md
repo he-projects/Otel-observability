@@ -87,7 +87,7 @@ Shared module `commons` provides:
 
 ## Prerequisites
 
-- Java 21+
+- Java 25
 - Maven 3.9+
 - Docker Desktop (for Kafka, Tempo, Loki, Prometheus, Grafana)
 
@@ -309,15 +309,22 @@ Expected inventory: `{ "1": 2, "3": 1 }` (cumulative from both orders).
 
 ---
 
-## Disabling OTel (local dev without Docker)
+## Disabling OTel or Kafka (local dev without Docker)
 
-If the observability stack is not running:
+**OTel** — if the observability stack is not running:
 
 ```
 -Dotel.sdk.disabled=true
 ```
 
-Kafka still requires the broker (`docker compose up kafka` is enough if you only need messaging).
+**Kafka** — start the broker before the services:
+
+```bash
+docker compose up -d kafka
+# wait ~15 seconds, then start catalog-service and order-service
+```
+
+To disable Kafka integration, set `kafka.enabled=false` in `application.yaml`.
 
 ---
 
