@@ -1,35 +1,27 @@
-package com.observability.order;
+package com.observability.order.services;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.web.bind.annotation.*;
+import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
-@RestController
-@RequestMapping("/api/orders")
-public class OrderController {
-
-    private static final Logger log = LoggerFactory.getLogger(OrderController.class);
+@Service
+@RequiredArgsConstructor
+@Slf4j
+public class OrderService {
     private final AtomicLong orderSequence = new AtomicLong(1000);
-
     private final RestTemplate restTemplate;
-    private final String catalogBaseUrl;
 
-    public OrderController(
-            RestTemplate restTemplate,
-            @Value("${catalog.base-url}") String catalogBaseUrl
-    ) {
-        this.restTemplate = restTemplate;
-        this.catalogBaseUrl = catalogBaseUrl;
-    }
+    @Value("${catalog.base-url}")
+    String catalogBaseUrl;
 
-    @PostMapping
-    public Map<String, Object> createOrder(@RequestBody Map<String, Object> request) {
+
+    public Map<String, Object> createOrder(Map<String, Object> request) {
         int productId = (int) request.get("productId");
         int quantity = request.containsKey("quantity") ? (int) request.get("quantity") : 1;
 
@@ -54,7 +46,6 @@ public class OrderController {
         );
     }
 
-    @GetMapping("/health-check")
     public Map<String, String> healthCheck() {
         restTemplate.getForObject(catalogBaseUrl + "/api/products", List.class);
         return Map.of("status", "ok", "catalog", "reachable");
